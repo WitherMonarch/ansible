@@ -1,0 +1,235 @@
+---
+- name: Configure Zabbix hosts via API
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_files:
+    - ../group_vars/zabbix_vars.yml
+  
+  vars:
+    zabbix_api_user: "Admin"
+    zabbix_api_password: "zabbix"  # Change this to your actual admin password
+    
+  tasks:
+    # Get zabbix host IPs from inventory
+    - name: Get zabbix IPs from inventory
+      set_fact:
+        zabbix1_ip: "{{ hostvars['zabbix1']['ansible_host'] }}"
+        zabbix2_ip: "{{ hostvars['zabbix2']['ansible_host'] }}"
+        zabbix_api_url: "https://{{ keepalived_vip }}/zabbix/api_jsonrpc.php"
+    # Login to Zabbix API
+    - name: Login to Zabbix API
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: "user.login"
+          params:
+            username: "{{ zabbix_api_user }}"
+            password: "{{ zabbix_api_password }}"
+          id: 1
+        validate_certs: no
+        status_code: 200
+      register: login_result
+
+    - name: Set auth token
+      set_fact:
+        zabbix_auth_token: "{{ login_result.json.result }}"
+
+    # Get host group ID for "Zabbix servers"
+    - name: Get Zabbix servers host group ID
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "hostgroup.get"
+          params:
+            filter:
+              name: ["Zabbix servers"]
+          id: 2
+        validate_certs: no
+      register: hostgroup_result
+
+        # Get template IDs
+    - name: Get template IDs
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "template.get"
+          params:
+            filter:
+              host:
+                - "Linux by Zabbix agent"
+                - "Zabbix server health"
+          id: 3
+        validate_certs: no
+        status_code: 200
+      register: template_result
+
+    - name: Build template list
+      set_fact:
+        template_list: >-
+          [
+            {% for template in template_result.json.result %}
+            {"templateid": "{{ template.templateid }}"}{{ "," if not loop.last else "" }}
+            {% endfor %}
+          ]
+      when: template_result.json.result is defined
+
+    # Create/Update Zabbix Server 1
+    - name: Create/Update Zabbix Server 1 host
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "host.create"
+          params:
+            host: "Zabbix Server 1"
+            name: "Zabbix Server 1"
+            groups:
+              - groupid: "{{ hostgroup_result.json.result[0].groupid }}"
+            templates: "{{ template_list }}"
+            interfaces:
+              - type: 1
+                main: 1
+                useip: 1
+                ip: "{{ zabbix1_ip }}"
+                dns: ""
+                port: "10050"
+          id: 4
+        validate_certs: no
+        status_code: [200]
+      register: host1_result
+      failed_when: host1_result.json.error is defined and 'already exists' not in (host1_result.json.error.data | default(''))
+
+    # Create/Update Zabbix Server 2
+    - name: Create/Update Zabbix Server 2 host
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "host.create"
+          params:
+            host: "Zabbix Server 2"
+            name: "Zabbix Server 2"
+            groups:
+              - groupid: "{{ hostgroup_result.json.result[0].groupid }}"
+            templates: "{{ template_list }}"
+            interfaces:
+              - type: 1
+                main: 1
+                useip: 1
+                ip: "{{ zabbix2_ip }}"
+                dns: ""
+                port: "10050"
+          id: 5
+        validate_certs: no
+        status_code: [200]
+      register: host2_result
+      failed_when: host2_result.json.error is defined and 'already exists' not in (host2_result.json.error.data | default(''))
+
+    # Wait 10 seconds before triggering update
+    - name: Wait 10 seconds for hosts to initialize
+      pause:
+        seconds: 10
+
+    # Get created host IDs for mass update
+    - name: Get Zabbix Server hosts for update
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "host.get"
+          params:
+            filter:
+              host:
+                - "Zabbix Server 1"
+                - "Zabbix Server 2"
+          id: 8
+        validate_certs: no
+        status_code: [200]
+      register: created_hosts_result
+
+    # Trigger mass update to enable monitoring and refresh status
+    - name: Mass update hosts to trigger status check
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "host.massupdate"
+          params:
+            hosts: "{{ created_hosts_result.json.result | map(attribute='hostid') | map('regex_replace', '^(.*)$', '{\"hostid\": \"\\1\"}') | list }}"
+            status: 0
+          id: 9
+        validate_certs: no
+        status_code: [200]
+      register: massupdate_result
+      ignore_errors: yes
+
+    # Delete the default Zabbix server host
+    - name: Get default Zabbix server host
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "host.get"
+          params:
+            filter:
+              host: ["Zabbix server"]
+          id: 6
+        validate_certs: no
+        status_code: [200]
+      register: default_host_result
+
+    - name: Delete default Zabbix server host
+      uri:
+        url: "{{ zabbix_api_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ zabbix_auth_token }}"
+        body:
+          jsonrpc: "2.0"
+          method: "host.delete"
+          params:
+            - "{{ default_host_result.json.result[0].hostid }}"
+          id: 7
+        validate_certs: no
+        status_code: [200]
+      when: default_host_result.json.result is defined and default_host_result.json.result | length > 0
+      register: delete_result
+
+    - name: Display completion message
+      debug:
+        msg: "Successfully created Zabbix Server 1 ({{ zabbix1_ip }}:10050) and Zabbix Server 2 ({{ zabbix2_ip }}:10050) hosts via API"
