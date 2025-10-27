@@ -418,8 +418,8 @@
       command: restorecon -R /root/.ssh
       changed_when: false
 
-    # Create httpd config sync script
-    - name: Create httpd config sync script
+    # Create httpd and Zabbix config sync script
+    - name: Create httpd and Zabbix config sync script
       copy:
         content: |
           #!/bin/bash
@@ -432,7 +432,7 @@
           fi
           
           # Monitor directories for changes
-          inotifywait -m -r -e modify,create,delete,move /etc/httpd/conf /etc/httpd/conf.d |
+          inotifywait -m -r -e modify,create,delete,move /etc/httpd/conf /etc/httpd/conf.d /etc/zabbix/web |
           while read path action file; do
             echo "$(date): Change detected in $path$file - $action"
             
@@ -443,6 +443,10 @@
             # Sync /etc/httpd/conf.d
             rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
               /etc/httpd/conf.d/ root@$REMOTE_HOST:/etc/httpd/conf.d/
+            
+            # Sync /etc/zabbix/web
+            rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+              /etc/zabbix/web/ root@$REMOTE_HOST:/etc/zabbix/web/
             
             # Reload httpd on remote server
             ssh -o StrictHostKeyChecking=no root@$REMOTE_HOST "systemctl reload httpd"
