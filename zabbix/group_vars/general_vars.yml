@@ -1,0 +1,4 @@
+ansible_user: rosemont
+ansible_ssh_pass: crosemont
+ansible_become: yes
+ansible_become_method: sudo

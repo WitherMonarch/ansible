@@ -1,0 +1,498 @@
+- name: Configure Zabbix servers
+  hosts: zabbix
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/zabbix_vars.yml
+    - ../group_vars/general_vars.yml
+    - ../group_vars/mariadb_vars.yml
+
+  tasks:
+
+    # Add MariaDB nodes to /etc/hosts
+    - name: Add maria1 to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars['maria1']['ansible_host'] }} maria1.{{ domain_name }} maria1"
+        state: present
+
+    - name: Add maria2 to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars['maria2']['ansible_host'] }} maria2.{{ domain_name }} maria2"
+        state: present
+
+    - name: Add maria3 to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars['maria3']['ansible_host'] }} maria3.{{ domain_name }} maria3"
+        state: present
+
+    # Install EPEL release
+    - name: Install EPEL release
+      dnf:
+        name: epel-release
+        state: present
+
+    # Add excludepkgs to EPEL repo configuration
+    - name: Exclude Zabbix packages from EPEL repository
+      lineinfile:
+        path: /etc/yum.repos.d/epel.repo
+        insertafter: '^\[epel\]'
+        line: 'excludepkgs=zabbix*'
+        state: present
+
+    # Add Zabbix repository
+    - name: Add Zabbix 7.4 repository
+      dnf:
+        name: https://repo.zabbix.com/zabbix/7.4/release/alma/9/noarch/zabbix-release-latest-7.4.el9.noarch.rpm
+        state: present
+        disable_gpg_check: yes
+
+    # Clean DNF cache
+    - name: Clean DNF cache
+      command: dnf clean all
+
+    # Install Zabbix packages
+    - name: Install Zabbix server and related packages
+      dnf:
+        name:
+          - zabbix-server-mysql
+          - zabbix-web-mysql
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-selinux-policy
+          - zabbix-agent
+          - mariadb
+          - haproxy
+          - keepalived
+          - inotify-tools
+          - mod_ssl
+          - python3-cryptography
+          - sshpass
+        state: present
+
+    # Configure SELinux booleans
+    - name: Set SELinux boolean for HAProxy to connect anywhere
+      seboolean:
+        name: haproxy_connect_any
+        state: yes
+        persistent: yes
+
+    - name: Set SELinux boolean for httpd to connect to network
+      seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+
+    - name: Set SELinux boolean for Zabbix to connect to network
+      seboolean:
+        name: zabbix_can_network
+        state: yes
+        persistent: yes
+
+    # Configure firewall
+    - name: Open MySQL service in firewall
+      firewalld:
+        service: mysql
+        permanent: yes
+        state: enabled
+
+    - name: Open HTTPS service in firewall
+      firewalld:
+        service: https
+        permanent: yes
+        state: enabled
+
+    - name: Open Zabbix server service in firewall
+      firewalld:
+        service: zabbix-server
+        permanent: yes
+        state: enabled
+
+    - name: Open Zabbix agent service in firewall
+      firewalld:
+        service: zabbix-agent
+        permanent: yes
+        state: enabled
+
+    - name: Reload firewall
+      command: firewall-cmd --reload
+
+    # Deploy keepalived configuration
+    - name: Deploy keepalived configuration
+      template:
+        src: ../templates/keepalived.cnf.j2
+        dest: /etc/keepalived/keepalived.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Enable and start keepalived service
+    - name: Enable and start keepalived service
+      systemd:
+        name: keepalived
+        state: started
+        enabled: yes
+
+    # Deploy HAProxy configuration
+    - name: Deploy HAProxy configuration
+      template:
+        src: ../templates/haproxy.cnf.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Create systemd override directory for HAProxy
+    - name: Create systemd override directory for HAProxy
+      file:
+        path: /etc/systemd/system/haproxy.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Create HAProxy systemd override
+    - name: Create HAProxy systemd override
+      copy:
+        content: |
+          [Unit]
+          After=keepalived.service
+          Requires=keepalived.service
+
+          [Service]
+          ExecStartPre=/usr/bin/bash -c 'until ip addr show {{ interface_name }} | grep -q {{ keepalived_vip }}; do sleep 1; done'
+        dest: /etc/systemd/system/haproxy.service.d/override.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Reload systemd daemon
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    # Enable and start HAProxy service
+    - name: Enable and start HAProxy service
+      systemd:
+        name: haproxy
+        state: started
+        enabled: yes
+
+    # Test database connection via VIP
+    - name: Test database connection via VIP
+      shell: mysql -u {{ db_user }} -p{{ db_password }} -h {{ keepalived_vip }} zabbix -e "SELECT 1;"
+      register: db_connection_test
+      changed_when: false
+
+    - name: Display database connection test result
+      debug:
+        msg: "Database connection via VIP successful"
+
+    # Set log_bin_trust_function_creators on maria1
+    - name: Enable log_bin_trust_function_creators on maria1
+      shell: mysql -u root -p{{ mariadb_root_password }} -e "SET GLOBAL log_bin_trust_function_creators = 1;"
+      delegate_to: maria1
+      run_once: true
+
+    # Copy Zabbix database schema directly from zabbix1 to maria1
+    - name: Copy schema file directly from zabbix1 to maria1
+      shell: sshpass -p 'crosemont' scp -o StrictHostKeyChecking=no /usr/share/zabbix/sql-scripts/mysql/server.sql.gz rosemont@{{ hostvars['maria1']['ansible_host'] }}:/tmp/zabbix-server.sql.gz
+      delegate_to: zabbix1
+      run_once: true
+
+    # Import Zabbix database schema directly on maria1
+    - name: Import Zabbix database schema directly on maria1
+      shell: zcat /tmp/zabbix-server.sql.gz | mysql --default-character-set=utf8mb4 -u root -p{{ mariadb_root_password }} zabbix
+      delegate_to: maria1
+      run_once: true
+
+    - name: Clean up schema file on maria1
+      file:
+        path: /tmp/zabbix-server.sql.gz
+        state: absent
+      delegate_to: maria1
+      run_once: true
+
+    # Disable log_bin_trust_function_creators on maria1
+    - name: Disable log_bin_trust_function_creators on maria1
+      shell: mysql -u root -p{{ mariadb_root_password }} -e "SET GLOBAL log_bin_trust_function_creators = 0;"
+      delegate_to: maria1
+      run_once: true
+
+    # Append Zabbix server configuration
+    - name: Append Zabbix server database and HA configuration
+      blockinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        block: "{{ lookup('template', '../templates/zabbix_server.cnf.j2') }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - Zabbix Server Configuration"
+        backup: yes
+
+    # Configure Zabbix agent ServerIP
+    - name: Configure Zabbix agent Server setting
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Server='
+        line: "Server={{ hostvars['zabbix1']['ansible_host'] }},{{ hostvars['zabbix2']['ansible_host'] }}"
+        backup: yes
+
+    # Configure Zabbix agent Hostname
+    - name: Configure Zabbix agent Hostname setting
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Hostname='
+        line: "Hostname=Zabbix Server {{ '1' if inventory_hostname == 'zabbix1' else '2' }}"
+
+    # Enable and start Zabbix server
+    - name: Enable and start Zabbix server
+      systemd:
+        name: zabbix-server
+        state: started
+        enabled: yes
+      register: zabbix_start
+      until: zabbix_start is success
+      retries: 3
+      delay: 10
+
+    # Generate self-signed SSL certificates
+    - name: Generate SSL private key
+      openssl_privatekey:
+        path: /etc/pki/tls/private/zabbix.key
+        size: 2048
+        mode: '0600'
+
+    - name: Generate SSL certificate signing request (CSR)
+      openssl_csr:
+        path: /etc/pki/tls/certs/zabbix.csr
+        privatekey_path: /etc/pki/tls/private/zabbix.key
+        common_name: "{{ ansible_fqdn }}"
+        organization_name: "Zabbix Monitoring"
+
+    - name: Generate self-signed SSL certificate
+      openssl_certificate:
+        path: /etc/pki/tls/certs/zabbix.crt
+        privatekey_path: /etc/pki/tls/private/zabbix.key
+        csr_path: /etc/pki/tls/certs/zabbix.csr
+        provider: selfsigned
+        selfsigned_not_after: "+3650d"  # Valid for 10 years
+
+    # Configure Apache SSL
+    - name: Configure SSL virtual host for Zabbix
+      copy:
+        content: |
+          <VirtualHost *:443>
+              ServerName {{ ansible_fqdn }}
+              
+              SSLEngine on
+              SSLCertificateFile /etc/pki/tls/certs/zabbix.crt
+              SSLCertificateKeyFile /etc/pki/tls/private/zabbix.key
+              
+              DocumentRoot /usr/share/zabbix
+              
+              <Directory "/usr/share/zabbix">
+                  Options FollowSymLinks
+                  AllowOverride None
+                  Require all granted
+                  
+                  <IfModule mod_php.c>
+                      php_value max_execution_time 300
+                      php_value memory_limit 128M
+                      php_value post_max_size 16M
+                      php_value upload_max_filesize 2M
+                      php_value max_input_time 300
+                      php_value max_input_vars 10000
+                      php_value always_populate_raw_post_data -1
+                      php_value date.timezone {{ timezone | default('UTC') }}
+                  </IfModule>
+              </Directory>
+              
+              <Directory "/usr/share/zabbix/conf">
+                  Require all denied
+              </Directory>
+              
+              <Directory "/usr/share/zabbix/app">
+                  Require all denied
+              </Directory>
+              
+              <Directory "/usr/share/zabbix/include">
+                  Require all denied
+              </Directory>
+              
+              <Directory "/usr/share/zabbix/local">
+                  Require all denied
+              </Directory>
+          </VirtualHost>
+        dest: /etc/httpd/conf.d/zabbix-ssl.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Optional: Redirect HTTP to HTTPS
+    - name: Configure HTTP to HTTPS redirect
+      copy:
+        content: |
+          <VirtualHost *:80>
+              ServerName {{ ansible_fqdn }}
+              Redirect permanent / https://{{ ansible_fqdn }}/
+          </VirtualHost>
+        dest: /etc/httpd/conf.d/zabbix-redirect.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Enable and start httpd and php-fpm
+    - name: Enable and start httpd
+      systemd:
+        name: httpd
+        state: started
+        enabled: yes
+
+    - name: Enable and start php-fpm
+      systemd:
+        name: php-fpm
+        state: started
+        enabled: yes
+
+    # Set up SSH key-based authentication for httpd config sync
+    - name: Generate SSH key for root user on each Zabbix server
+      user:
+        name: root
+        generate_ssh_key: yes
+        ssh_key_type: ed25519
+        ssh_key_file: .ssh/id_ed25519
+
+    - name: Fetch SSH public key from zabbix1
+      slurp:
+        src: /root/.ssh/id_ed25519.pub
+      register: zabbix1_pubkey
+      when: inventory_hostname == 'zabbix1'
+
+    - name: Fetch SSH public key from zabbix2
+      slurp:
+        src: /root/.ssh/id_ed25519.pub
+      register: zabbix2_pubkey
+      when: inventory_hostname == 'zabbix2'
+
+    - name: Set fact for zabbix1 public key
+      set_fact:
+        zabbix1_key: "{{ hostvars['zabbix1']['zabbix1_pubkey']['content'] | b64decode }}"
+      run_once: true
+
+    - name: Set fact for zabbix2 public key
+      set_fact:
+        zabbix2_key: "{{ hostvars['zabbix2']['zabbix2_pubkey']['content'] | b64decode }}"
+      run_once: true
+
+    - name: Add zabbix2's public key to zabbix1's authorized_keys
+      authorized_key:
+        user: root
+        key: "{{ zabbix2_key }}"
+        state: present
+      when: inventory_hostname == 'zabbix1'
+
+    - name: Add zabbix1's public key to zabbix2's authorized_keys
+      authorized_key:
+        user: root
+        key: "{{ zabbix1_key }}"
+        state: present
+      when: inventory_hostname == 'zabbix2'
+
+    # Fix SSH directory permissions and SELinux contexts
+    - name: Ensure .ssh directory has correct permissions
+      file:
+        path: /root/.ssh
+        owner: root
+        group: root
+        mode: '0700'
+        state: directory
+
+    - name: Ensure authorized_keys has correct permissions
+      file:
+        path: /root/.ssh/authorized_keys
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Restore SELinux context on .ssh directory
+      command: restorecon -R /root/.ssh
+      changed_when: false
+
+    # Create httpd config sync script
+    - name: Create httpd config sync script
+      copy:
+        content: |
+          #!/bin/bash
+          
+          # Determine the remote server
+          if [ "{{ inventory_hostname }}" == "zabbix1" ]; then
+            REMOTE_HOST="{{ hostvars['zabbix2']['ansible_host'] }}"
+          else
+            REMOTE_HOST="{{ hostvars['zabbix1']['ansible_host'] }}"
+          fi
+          
+          # Monitor directories for changes
+          inotifywait -m -r -e modify,create,delete,move /etc/httpd/conf /etc/httpd/conf.d |
+          while read path action file; do
+            echo "$(date): Change detected in $path$file - $action"
+            
+            # Sync /etc/httpd/conf
+            rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+              /etc/httpd/conf/ root@$REMOTE_HOST:/etc/httpd/conf/
+            
+            # Sync /etc/httpd/conf.d
+            rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+              /etc/httpd/conf.d/ root@$REMOTE_HOST:/etc/httpd/conf.d/
+            
+            # Reload httpd on remote server
+            ssh -o StrictHostKeyChecking=no root@$REMOTE_HOST "systemctl reload httpd"
+            
+            echo "$(date): Configuration synced to $REMOTE_HOST"
+          done
+        dest: /usr/local/bin/httpd-config-sync.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Create systemd service for httpd config sync
+    - name: Create systemd service for httpd config sync
+      copy:
+        content: |
+          [Unit]
+          Description=Apache httpd configuration synchronization service
+          After=network.target httpd.service
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/httpd-config-sync.sh
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/httpd-config-sync.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Reload systemd and enable httpd config sync service
+    - name: Reload systemd daemon for httpd sync service
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start httpd config sync service
+      systemd:
+        name: httpd-config-sync
+        state: started
+        enabled: yes
+
+    # Enable and start Zabbix agent
+    - name: Enable and start Zabbix agent
+      systemd:
+        name: zabbix-agent
+        state: started
+        enabled: yes
+      register: zabbix_agent_start
+      until: zabbix_agent_start is success
+      retries: 3
+      delay: 5

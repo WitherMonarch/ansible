@@ -1,0 +1,13 @@
+db_user: zabbix
+db_name: zabbix
+db_password: crosemont
+haproxy_db_user: haproxy
+keepalived_password: crosemont
+keepalived_vip: 192.168.10.210
+interface_name: ens18
+priority1: 150
+priority2: 149
+state1: MASTER
+state2: BACKUP
+virtual_router_id: 51
+domain_name: rosemont.com

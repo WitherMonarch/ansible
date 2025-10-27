@@ -1,0 +1,168 @@
+- name: Install and configure MariaDB on all nodes
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Install MariaDB Galera server
+    - name: Install MariaDB Galera server
+      dnf:
+        name: mariadb-server-galera
+        state: present
+
+    # Open firewall ports
+    - name: Open MariaDB and Galera ports in firewall
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+      loop:
+        - 3306/tcp
+        - 4567/tcp
+        - 4568/tcp
+        - 4444/tcp
+
+    # Reload firewall
+    - name: Reload firewall
+      service:
+        name: firewalld
+        state: reloaded
+
+- name: Bootstrap MariaDB cluster on Maria1
+  hosts: maria1
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Copy bootstrap Galera config for Maria1
+    - name: Copy bootstrap Galera config
+      template:
+        src: ../templates/galera.cnf.j2
+        dest: /etc/my.cnf.d/galera.cnf
+        owner: root
+        group: root
+        mode: '0644'
+      vars:
+        bootstrap: true
+
+    # Bootstrap cluster on Maria1
+    - name: Bootstrap MariaDB cluster
+      command: galera_new_cluster
+
+    # Enable and start MariaDB on Maria1
+    - name: Enable and start MariaDB
+      systemd:
+        name: mariadb
+
+    # Secure MariaDB installation
+    - name: Secure MariaDB installation
+      expect:
+        command: mysql_secure_installation
+        responses:
+          "Enter current password for root.*": ""
+          "Switch to unix_socket authentication.*": "n"
+          "Change the root password.*": "n"
+          "Remove anonymous users.*": "y"
+          "Disallow root login remotely.*": "y"
+          "Remove test database and access to it.*": "y"
+          "Reload privilege tables now.*": "y"
+
+    # Set Maria1 root password
+    - name: Set Maria1 root password
+      shell: |
+        mysql -u root <<EOF
+        ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mariadb_root_password }}';
+        FLUSH PRIVILEGES;
+        EOF
+
+    # Replace Maria1 config with full cluster config
+    - name: Replace Maria1 Galera config with full cluster config
+      template:
+        src: ../templates/galera.cnf.j2
+        dest: /etc/my.cnf.d/galera.cnf
+        owner: root
+        group: root
+        mode: '0644'
+      vars:
+        bootstrap: false
+
+- name: Configure MariaDB replicas (Maria2 and Maria3)
+  hosts: mariadb:!maria1
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Copy Galera config for replicas
+    - name: Copy Galera config for Maria2 and Maria3
+      template:
+        src: ../templates/galera.cnf.j2
+        dest: /etc/my.cnf.d/galera.cnf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # Enable and start MariaDB on replicas
+    - name: Enable and start MariaDB replicas
+      systemd:
+        name: mariadb
+        enabled: yes
+        state: started
+
+- name: Verify cluster status on all nodes
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Check cluster size 
+    - name: Check cluster size
+      shell: mysql -u root -p{{ mariadb_root_password }} -sN -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+      register: cluster_status
+
+    - name: Display cluster status
+      debug:
+        msg: "wsrep_cluster_size = {{ cluster_status.stdout.split('\t')[1] }}"
+
+- name: Create Zabbix database and users on Maria1
+  hosts: maria1
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+    - ../group_vars/zabbix_vars.yml
+
+  tasks:
+
+    # Create Zabbix database and users
+    - name: Create Zabbix database and grant privileges to Zabbix servers
+      shell: |
+        mysql -u root -p{{ mariadb_root_password }} <<EOF
+        CREATE DATABASE zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+        CREATE USER '{{ db_user }}'@'{{ hostvars['zabbix1']['ansible_host'] }}' IDENTIFIED BY '{{ db_password }}';
+        CREATE USER '{{ db_user }}'@'{{ hostvars['zabbix2']['ansible_host'] }}' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON zabbix.* TO '{{ db_user }}'@'{{ hostvars['zabbix1']['ansible_host'] }}';
+        GRANT ALL PRIVILEGES ON zabbix.* TO '{{ db_user }}'@'{{ hostvars['zabbix2']['ansible_host'] }}';
+        CREATE USER '{{ haproxy_db_user }}'@'%';
+        FLUSH PRIVILEGES;
+        EOF
+
+    - name: Display Zabbix database creation result
+      debug:
+        msg: "Zabbix database created and privileges granted to {{ db_user }} from {{ hostvars['zabbix1']['ansible_host'] }} and {{ hostvars['zabbix2']['ansible_host'] }}. HAProxy user {{ haproxy_db_user }} created."

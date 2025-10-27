@@ -1,0 +1,14 @@
+### Additional configuration for Zabbix Server ###
+
+### Database connection
+DBHost={{ keepalived_vip }}
+DBPassword={{ db_password }}
+
+### High Availability Cluster Configuration
+{% if inventory_hostname == 'zabbix1' %}
+HANodeName=zabbix1
+NodeAddress={{ ansible_host }}
+{% elif inventory_hostname == 'zabbix2' %}
+HANodeName=zabbix2
+NodeAddress={{ ansible_host }}
+{% endif %}

@@ -1,0 +1,14 @@
+vrrp_instance VI_ZABBIX {
+    state {{ state1 if inventory_hostname == 'zabbix1' else state2 }}
+    interface {{ interface_name }}
+    virtual_router_id {{ virtual_router_id }}
+    priority {{ priority1 if inventory_hostname == 'zabbix1' else priority2 }}
+    advert_int 2
+    authentication {
+        auth_type PASS
+        auth_pass {{ keepalived_password }}
+    }
+    virtual_ipaddress {
+        {{ keepalived_vip }}
+    }
+}

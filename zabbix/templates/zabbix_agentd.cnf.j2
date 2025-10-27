@@ -1,0 +1,11 @@
+### Additional configuration for Zabbix Agent ###
+
+### Server configuration
+Server={{ hostvars['zabbix1']['ansible_host'] }},{{ hostvars['zabbix2']['ansible_host'] }}
+
+### Hostname configuration
+{% if inventory_hostname == 'zabbix1' %}
+Hostname=Zabbix Server 1
+{% elif inventory_hostname == 'zabbix2' %}
+Hostname=Zabbix Server 2
+{% endif %}

@@ -1,0 +1,132 @@
+- name: Check safe_to_bootstrap status on all MariaDB nodes
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Check safe_to_bootstrap value
+    - name: Check safe_to_bootstrap value
+      shell: "grep safe_to_bootstrap /var/lib/mysql/grastate.dat | awk -F': ' '{print $2}'"
+      register: safe_to_bootstrap
+      changed_when: false
+
+    # Get seqno (sequence number) to determine which node has the most recent data
+    - name: Get seqno from grastate.dat
+      shell: "grep 'seqno:' /var/lib/mysql/grastate.dat | awk -F': ' '{print $2}'"
+      register: seqno
+      changed_when: false
+
+    - name: Display safe_to_bootstrap value and seqno
+      debug:
+        msg: "{{ inventory_hostname }}: safe_to_bootstrap = {{ safe_to_bootstrap.stdout }}, seqno = {{ seqno.stdout }}"
+
+- name: Handle case where no node has safe_to_bootstrap = 1
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Check if any node has safe_to_bootstrap = 1
+    - name: Check if bootstrap node exists
+      set_fact:
+        has_bootstrap_node: "{{ groups['mariadb'] | map('extract', hostvars) | selectattr('safe_to_bootstrap.stdout', 'equalto', '1') | list | length > 0 }}"
+      run_once: true
+
+    # Find the node with highest seqno
+    - name: Determine node with highest seqno
+      set_fact:
+        bootstrap_candidate: "{{ groups['mariadb'] | map('extract', hostvars) | sort(attribute='seqno.stdout', reverse=true) | first }}"
+      run_once: true
+      when: not has_bootstrap_node
+
+    - name: Display bootstrap candidate
+      debug:
+        msg: "No node has safe_to_bootstrap = 1. Node with highest seqno is {{ bootstrap_candidate.inventory_hostname }} (seqno: {{ bootstrap_candidate.seqno.stdout }})"
+      run_once: true
+      when: not has_bootstrap_node
+
+    # Force safe_to_bootstrap on the node with highest seqno
+    - name: Force safe_to_bootstrap to 1 on node with highest seqno
+      shell: "sed -i 's/safe_to_bootstrap: 0/safe_to_bootstrap: 1/' /var/lib/mysql/grastate.dat"
+      when:
+        - not has_bootstrap_node
+        - inventory_hostname == bootstrap_candidate.inventory_hostname
+
+    - name: Pause for confirmation
+      pause:
+        prompt: "Press Enter to continue with bootstrap on {{ bootstrap_candidate.inventory_hostname }} or Ctrl+C to abort"
+      run_once: true
+      when: not has_bootstrap_node
+
+- name: Bootstrap cluster on the node with safe_to_bootstrap = 1
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Bootstrap the cluster on the node that has safe_to_bootstrap = 1
+    - name: Bootstrap MariaDB cluster
+      command: galera_new_cluster
+      when: hostvars[inventory_hostname]['safe_to_bootstrap']['stdout'] == '1'
+
+- name: Restart MariaDB on other nodes
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Wait for bootstrap to complete (check if the bootstrap node is up)
+    - name: Wait for bootstrap node to be ready
+      shell: mysql -u root -p{{ mariadb_root_password }} -e "SELECT 1;" > /dev/null 2>&1
+      register: bootstrap_check
+      until: bootstrap_check.rc == 0
+      retries: 30
+      delay: 2
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mariadb'] }}"
+      when: 
+        - hostvars[inventory_hostname]['safe_to_bootstrap']['stdout'] == '0'
+        - hostvars[item]['safe_to_bootstrap']['stdout'] == '1'
+      run_once: true
+
+    # Restart MariaDB on nodes that didn't bootstrap
+    - name: Restart MariaDB on non-bootstrap nodes
+      systemd:
+        name: mariadb
+        state: restarted
+      when: hostvars[inventory_hostname]['safe_to_bootstrap']['stdout'] == '0'
+
+- name: Verify cluster status on all nodes
+  hosts: mariadb
+  become: yes
+  gather_facts: yes
+  vars_files:
+    - ../group_vars/mariadb_vars.yml
+    - ../group_vars/general_vars.yml
+
+  tasks:
+
+    # Check cluster size
+    - name: Check cluster size
+      shell: mysql -u root -p{{ mariadb_root_password }} -sN -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+      register: cluster_status
+
+    - name: Display cluster status
+      debug:
+        msg: "{{ inventory_hostname }}: wsrep_cluster_size = {{ cluster_status.stdout.split('\t')[1] }}"

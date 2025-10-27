@@ -1,0 +1,2 @@
+mariadb_root_password: crosemont
+galera_cluster_name: zabbix_db_cluster
