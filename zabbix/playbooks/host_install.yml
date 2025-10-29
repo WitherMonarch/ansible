@@ -1,5 +1,4 @@
-# Script by wither 
----
+# Script by wither
 - name: Configure Zabbix hosts via API
   hosts: localhost
   connection: local
@@ -12,6 +11,17 @@
     zabbix_api_password: "zabbix"  # Change this to your actual admin password
     
   tasks:
+    # Warning message
+    - name: Display warning message
+      pause:
+        prompt: |
+          
+          ⚠️  WARNING ⚠️
+          
+          This is a TEST playbook and does not work as intended.
+          
+          Press Ctrl+C to cancel, or press Enter to continue anyway.
+        
     # Get zabbix host IPs from inventory
     - name: Get zabbix IPs from inventory
       set_fact:
