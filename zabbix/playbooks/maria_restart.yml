@@ -1,3 +1,4 @@
+# Script by wither
 - name: Check safe_to_bootstrap status on all MariaDB nodes
   hosts: mariadb
   become: yes

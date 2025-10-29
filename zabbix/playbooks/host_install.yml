@@ -1,3 +1,4 @@
+# Script by wither 
 ---
 - name: Configure Zabbix hosts via API
   hosts: localhost

@@ -1,3 +1,4 @@
+# Script by wither
 - name: Install and configure MariaDB on all nodes
   hosts: mariadb
   become: yes

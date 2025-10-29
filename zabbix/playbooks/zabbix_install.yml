@@ -1,3 +1,4 @@
+# Script by wither
 - name: Configure Zabbix servers
   hosts: zabbix
   become: yes
