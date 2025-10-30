@@ -1,0 +1,17 @@
+- name: Stop Zabbix server and shut down node
+  hosts: all
+  become: yes
+  gather_facts: false
+  vars_files:
+    - ../group_vars/general_vars.yml
+
+  tasks:
+    - name: Stop Zabbix server
+      ansible.builtin.systemd:
+        name: zabbix-server
+        state: stopped
+
+    - name: Shutdown system immediately
+      ansible.builtin.command: shutdown now
+      async: 0
+      poll: 0

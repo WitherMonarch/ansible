@@ -3,8 +3,8 @@ db_name: zabbix
 db_password: crosemont
 haproxy_db_user: haproxy
 keepalived_password: crosemont
-keepalived_vip: 192.168.10.210
-interface_name: ens18
+keepalived_vip: 192.168.10.210 # Change this
+interface_name: ens18 # Chnage this
 priority1: 150
 priority2: 149
 state1: MASTER
