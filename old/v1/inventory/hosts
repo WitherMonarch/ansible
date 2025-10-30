@@ -1,9 +1,0 @@
-[zabbix]
-zabbix1
-zabbix2
-
-[mariadb]
-maria1 ansible_host=192.168.10.203 
-maria2 ansible_host=192.168.10.204 
-maria3 ansible_host=192.168.10.205 
-
