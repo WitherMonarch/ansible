@@ -145,47 +145,12 @@
         group: root
         mode: '0644'
 
-    # Create systemd override directory for HAProxy
-    - name: Create systemd override directory for HAProxy
-      file:
-        path: /etc/systemd/system/haproxy.service.d
-        state: directory
-        owner: root
-        group: root
-        mode: '0755'
-
-    # Create HAProxy systemd override
-    - name: Create HAProxy systemd override
-      copy:
-        content: |
-          [Unit]
-          After=keepalived.service
-          Requires=keepalived.service
-
-          [Service]
-          ExecStartPre=/usr/bin/bash -c 'until ip addr show {{ interface_name }} | grep -q {{ keepalived_vip }}; do sleep 1; done'
-        dest: /etc/systemd/system/haproxy.service.d/override.conf
-        owner: root
-        group: root
-        mode: '0644'
-
-    # Reload systemd daemon
-    - name: Reload systemd daemon
-      systemd:
-        daemon_reload: yes
-
     # Enable and start HAProxy service
     - name: Enable and start HAProxy service
       systemd:
         name: haproxy
         state: started
         enabled: yes
-
-    # Test database connection via VIP
-    - name: Test database connection via VIP
-      shell: mysql -u {{ db_user }} -p{{ db_password }} -h {{ keepalived_vip }} zabbix -e "SELECT 1;"
-      register: db_connection_test
-      changed_when: false
 
     - name: Display database connection test result
       debug:
@@ -444,10 +409,6 @@
             # Sync /etc/httpd/conf.d
             rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
               /etc/httpd/conf.d/ root@$REMOTE_HOST:/etc/httpd/conf.d/
-            
-            # Sync /etc/zabbix/web
-            rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
-              /etc/zabbix/web/ root@$REMOTE_HOST:/etc/zabbix/web/
             
             # Reload httpd on remote server
             ssh -o StrictHostKeyChecking=no root@$REMOTE_HOST "systemctl reload httpd"
